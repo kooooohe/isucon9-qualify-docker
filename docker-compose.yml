@@ -1,0 +1,29 @@
+version: "3.7"
+services:
+  debian:
+    build:
+      context: ./docker/debian
+    working_dir: /app
+    volumes:
+      - ./:/app/
+    tty: true
+    ports:
+      - 8000:8000
+    environment:
+      - MYSQL_HOST=mysql
+      - TZ=Asia/Tokyo
+
+  mysql:
+    image: mysql:5.7
+    volumes:
+      - ./docker/mysql/data:/var/lib/mysql
+      - ./webapp/sql/00_create_database.sql:/docker-entrypoint-initdb.d/0.sql
+      - ./webapp/sql/01_schema.sql:/docker-entrypoint-initdb.d/1.sql
+      - ./webapp/sql/02_categories.sql:/docker-entrypoint-initdb.d/2.sql
+      - ./webapp/sql/initial.sql:/docker-entrypoint-initdb.d/3.sql
+    environment:
+      - MYSQL_ROOT_PASSWORD=password
+      - MYSQL_DATABASE=test
+      - TZ=Asia/Tokyo
+      - LANG=C.UTF-8
+    restart: always
