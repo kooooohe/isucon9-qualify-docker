@@ -1,6 +1,6 @@
 version: "3.7"
 services:
-  debian:
+  workspace:
     build:
       context: ./docker/debian
     working_dir: /app
