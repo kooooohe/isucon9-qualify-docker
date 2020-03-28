@@ -1,3 +1,15 @@
+# isucon9-qualify-docker
+
+`isucon9-qualify` をDocker環境で動かせるようにしたものです  
+`docker-comopse up`  
+で環境構築をできます  
+
+MySQL初期起動時に、自動的に初期データが投入されます  
+データは `docker/mysql/data` に保存され永続化されます
+
+このDirectoryを消し、再起動すればまた初期データが投入されます
+
+
 # isucon9-qualify
 
 ## ディレクトリ構成
