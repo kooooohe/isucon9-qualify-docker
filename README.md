@@ -4,7 +4,9 @@
 `docker-comopse up`  
 で環境構築をできます  
 
-Originalの手順の中でDockerを使うもの以外は、すべてworkspace コンテナで行ってください。
+Originalの手順の中でDockerを使うもの  
+(isucon9-qualify/initial-data/Makefile　の実行)  
+以外は、すべてworkspace コンテナで行ってください。
 
 MySQL初期起動時に、自動的に初期データが投入されます  
 データは `docker/mysql/data` に保存され永続化されます
