@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	_ "net/http/pprof"
@@ -413,6 +414,25 @@ func getUserSimpleByID(q sqlx.Queryer, userID int64) (userSimple UserSimple, err
 	return userSimple, err
 }
 
+type UserSimpleMap map[int64]UserSimple
+
+func getUsersSimpleByID(q sqlx.Queryer, userIDs []string) (UserSimpleMap, error) {
+	users := make([]User, 0, len(userIDs))
+	err := sqlx.Select(q, &users, "SELECT * FROM `users` WHERE `id` in ("+strings.Join(userIDs, ",")+")")
+	if err != nil {
+		return nil, err
+	}
+	userSimples := make(UserSimpleMap, len(users))
+	for _, user := range users {
+		userSimples[user.ID] = UserSimple{
+			ID:           user.ID,
+			AccountName:  user.AccountName,
+			NumSellItems: user.NumSellItems,
+		}
+	}
+	return userSimples, nil
+}
+
 func getCategoryByID(q sqlx.Queryer, categoryID int) (category Category, err error) {
 	err = sqlx.Get(q, &category, "SELECT * FROM `categories` WHERE `id` = ?", categoryID)
 	if category.ParentID != 0 {
@@ -423,6 +443,53 @@ func getCategoryByID(q sqlx.Queryer, categoryID int) (category Category, err err
 		category.ParentCategoryName = parentCategory.CategoryName
 	}
 	return category, err
+}
+
+type CategoryMap map[int]Category
+
+func getCategoriesByID(q sqlx.Queryer, categoryIDs []string) (CategoryMap, error) {
+	categories := make([]Category, 0, len(categoryIDs))
+	err := sqlx.Select(q, &categories, "SELECT * FROM `categories` WHERE `id` in ("+strings.Join(categoryIDs, ",")+")")
+	if err != nil {
+		return nil, err
+	}
+
+	parentIDMap := make(map[int]struct{}, len(categories))
+	for _, category := range categories {
+		if category.ParentID != 0 {
+			parentIDMap[category.ParentID] = struct{}{}
+		}
+	}
+
+	parentIDs := make([]string, 0, len(parentIDMap))
+	for parentID := range parentIDMap {
+		parentIDs = append(parentIDs, strconv.Itoa(parentID))
+	}
+
+	parentCategoryMap, err := getCategoriesByIDs(q, parentIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	categoryMap := make(CategoryMap, len(categories))
+	for _, category := range categories {
+		category.ParentCategoryName = parentCategoryMap[category.ParentID].CategoryName
+		categoryMap[category.ID] = category
+	}
+	return categoryMap, nil
+}
+
+func getCategoriesByIDs(q sqlx.Queryer, categoryIDs []string) (CategoryMap, error) {
+	categories := make([]Category, 0, len(categoryIDs))
+	err := sqlx.Select(q, &categories, "SELECT * FROM `categories` WHERE `id` in ("+strings.Join(categoryIDs, ",")+")")
+	if err != nil {
+		return nil, err
+	}
+	categoryMap := make(CategoryMap, len(categories))
+	for _, category := range categories {
+		categoryMap[category.ID] = category
+	}
+	return categoryMap, nil
 }
 
 func getConfigByName(name string) (string, error) {
@@ -564,17 +631,39 @@ func getNewItems(w http.ResponseWriter, r *http.Request) {
 	}
 
 	itemSimples := []ItemSimple{}
+
+	sellerIDMap := make(map[int64]struct{})
+	categoryIDMap := make(map[int]struct{})
 	for _, item := range items {
-		seller, err := getUserSimpleByID(dbx, item.SellerID)
-		if err != nil {
-			outputErrorMsg(w, http.StatusNotFound, "seller not found")
-			return
-		}
-		category, err := getCategoryByID(dbx, item.CategoryID)
-		if err != nil {
-			outputErrorMsg(w, http.StatusNotFound, "category not found")
-			return
-		}
+		sellerIDMap[item.SellerID] = struct{}{}
+		categoryIDMap[item.CategoryID] = struct{}{}
+	}
+
+	sellerIDs := make([]string, 0, len(sellerIDMap))
+	categoryIDs := make([]string, 0, len(categoryIDMap))
+	for sellerID := range sellerIDMap {
+		sellerIDs = append(sellerIDs, strconv.FormatInt(sellerID, 10))
+	}
+	for categoryID := range categoryIDMap {
+		categoryIDs = append(categoryIDs, strconv.Itoa(categoryID))
+	}
+
+	sellers, err := getUsersSimpleByID(dbx, sellerIDs)
+	if err != nil {
+		fmt.Println(err)
+		outputErrorMsg(w, http.StatusNotFound, "seller not found")
+		return
+	}
+	categoryMap, err := getCategoriesByID(dbx, categoryIDs)
+	if err != nil {
+		fmt.Println(err)
+		outputErrorMsg(w, http.StatusNotFound, "category not found")
+		return
+	}
+
+	for _, item := range items {
+		seller := sellers[item.SellerID]
+		category := categoryMap[item.CategoryID]
 		itemSimples = append(itemSimples, ItemSimple{
 			ID:         item.ID,
 			SellerID:   item.SellerID,
