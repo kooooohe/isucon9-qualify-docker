@@ -14,7 +14,9 @@ services:
       - TZ=Asia/Tokyo
 
   mysql:
-    image: mysql:5.7
+    #image: mysql:5.7
+    build:
+      context: ./docker/mysql
     volumes:
       - ./docker/mysql/data:/var/lib/mysql
       - ./webapp/sql/00_create_database.sql:/docker-entrypoint-initdb.d/0.sql
