@@ -4,6 +4,6 @@
 #log_output=FILE
 
 slow_query_log=1
-long_query_time=1
-log_queries_not_using_indexes=1
+long_query_time=0.01
+log_queries_not_using_indexes=0
 slow_query_log-file = /var/log/mysql/mysql-slow.sql
