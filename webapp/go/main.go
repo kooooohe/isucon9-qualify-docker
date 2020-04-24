@@ -303,9 +303,9 @@ func init() {
 }
 
 func main() {
-	// go func() {
-	// 	log.Println(http.ListenAndServe("0.0.0.0:6060", nil))
-	// }()
+	go func() {
+		log.Println(http.ListenAndServe("0.0.0.0:6060", nil))
+	}()
 
 	host := os.Getenv("MYSQL_HOST")
 	if host == "" {
@@ -457,11 +457,13 @@ func getUsersSimpleByID(q sqlx.Queryer, userIDs []string) (UserSimpleMap, error)
 func getCategoryByID(q sqlx.Queryer, categoryID int) (category Category, err error) {
 	err = sqlx.Get(q, &category, "SELECT * FROM `categories` WHERE `id` = ?", categoryID)
 	if category.ParentID != 0 {
-		parentCategory, err := getCategoryByID(q, category.ParentID)
-		if err != nil {
-			return category, err
-		}
-		category.ParentCategoryName = parentCategory.CategoryName
+		ptmp := &Category{}
+		err = sqlx.Get(q, ptmp, "SELECT category_name FROM `categories` WHERE `id` = ?", category.ParentID)
+		//parentCategory, err := getCategoryByID(q, category.ParentID)
+		//if err != nil {
+		//	return category, err
+		//}
+		category.ParentCategoryName = ptmp.CategoryName
 	}
 	return category, err
 }
