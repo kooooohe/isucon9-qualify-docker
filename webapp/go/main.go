@@ -12,7 +12,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
+	"strings"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -98,6 +100,13 @@ type Item struct {
 	CategoryID  int       `json:"category_id" db:"category_id"`
 	CreatedAt   time.Time `json:"-" db:"created_at"`
 	UpdatedAt   time.Time `json:"-" db:"updated_at"`
+}
+
+type ItemWithUserAndCategory struct {
+	Item               *Item     `db:"items"`
+	User               *User     `db:"users"`
+	Category           *Category `db:"categories"`
+	ParentCategoryName string    `db:"parent_category_name"`
 }
 
 type ItemSimple struct {
@@ -525,11 +534,41 @@ func getNewItems(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	items := []Item{}
+	//var items []Item
+
+	var itemsWithUserAndCategory []ItemWithUserAndCategory
+
+	selectedColumns := []string{
+		getColumns(Item{}, "items"),
+		getColumns(User{}, "users"),
+		getColumns(Category{}, "categories"),
+	}
+
 	if itemID > 0 && createdAt > 0 {
 		// paging
-		err := dbx.Select(&items,
-			"SELECT * FROM `items` WHERE `status` IN (?,?) AND (`created_at` < ?  OR (`created_at` <= ? AND `id` < ?)) ORDER BY `created_at` DESC, `id` DESC LIMIT ?",
+		//err := dbx.Select(&items,
+		//	"SELECT * FROM `items` WHERE `status` IN (?,?) AND (`created_at` < ?  OR (`created_at` <= ? AND `id` < ?)) ORDER BY `created_at` DESC, `id` DESC LIMIT ?",
+		//	ItemStatusOnSale,
+		//	ItemStatusSoldOut,
+		//	time.Unix(createdAt, 0),
+		//	time.Unix(createdAt, 0),
+		//	itemID,
+		//	ItemsPerPage+1,
+		//)
+		//if err != nil {
+		//	log.Print(err)
+		//	outputErrorMsg(w, http.StatusInternalServerError, "db error")
+		//	return
+		//}
+		err = dbx.Select(
+			&itemsWithUserAndCategory,
+			"SELECT "+
+				strings.Join(selectedColumns, ",")+",`parent_categories`.`category_name` as \"parent_category_name\" "+
+				"FROM `items` "+
+				"JOIN `users` ON `users`.`id` = `items`.`seller_id` "+
+				"JOIN `categories` ON categories.id = `items`.`category_id` "+
+				"JOIN `categories` AS parent_categories ON categories.parent_id = `parent_categories`.`id` "+
+				"WHERE `items`.`status` IN (?,?) AND (`items`.`created_at` < ?  OR (`items`.`created_at` <= ? AND `items`.`id` < ?)) ORDER BY `items`.`created_at` DESC, `items`.`id` DESC LIMIT ?",
 			ItemStatusOnSale,
 			ItemStatusSoldOut,
 			time.Unix(createdAt, 0),
@@ -544,8 +583,26 @@ func getNewItems(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		// 1st page
-		err := dbx.Select(&items,
-			"SELECT * FROM `items` WHERE `status` IN (?,?) ORDER BY `created_at` DESC, `id` DESC LIMIT ?",
+		//err := dbx.Select(&items,
+		//	"SELECT * FROM `items` WHERE `status` IN (?,?) ORDER BY `created_at` DESC, `id` DESC LIMIT ?",
+		//	ItemStatusOnSale,
+		//	ItemStatusSoldOut,
+		//	ItemsPerPage+1,
+		//)
+		//if err != nil {
+		//	log.Print(err)
+		//	outputErrorMsg(w, http.StatusInternalServerError, "db error")
+		//	return
+		//}
+		err = dbx.Select(
+			&itemsWithUserAndCategory,
+			"SELECT "+
+				strings.Join(selectedColumns, ",")+",`parent_categories`.`category_name` as \"parent_category_name\" "+
+				"FROM `items` "+
+				"JOIN `users` ON `users`.`id` = `items`.`seller_id` "+
+				"JOIN `categories` ON categories.id = `items`.`category_id` "+
+				"JOIN `categories` AS parent_categories ON categories.parent_id = `parent_categories`.`id` "+
+				"WHERE `items`.`status` IN (?,?) ORDER BY `items`.`created_at` DESC, `items`.`id` DESC LIMIT ?",
 			ItemStatusOnSale,
 			ItemStatusSoldOut,
 			ItemsPerPage+1,
@@ -557,29 +614,53 @@ func getNewItems(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	itemSimples := []ItemSimple{}
-	for _, item := range items {
-		seller, err := getUserSimpleByID(dbx, item.SellerID)
-		if err != nil {
-			outputErrorMsg(w, http.StatusNotFound, "seller not found")
-			return
-		}
-		category, err := getCategoryByID(dbx, item.CategoryID)
-		if err != nil {
-			outputErrorMsg(w, http.StatusNotFound, "category not found")
-			return
-		}
+	itemSimples := make([]ItemSimple, 0, 50)
+	//for _, item := range items {
+	//	seller, err := getUserSimpleByID(dbx, item.SellerID)
+	//	if err != nil {
+	//		outputErrorMsg(w, http.StatusNotFound, "seller not found")
+	//		return
+	//	}
+	//	category, err := getCategoryByID(dbx, item.CategoryID)
+	//	if err != nil {
+	//		outputErrorMsg(w, http.StatusNotFound, "category not found")
+	//		return
+	//	}
+	//	itemSimples = append(itemSimples, ItemSimple{
+	//		ID:         item.ID,
+	//		SellerID:   item.SellerID,
+	//		Seller:     &seller,
+	//		Status:     item.Status,
+	//		Name:       item.Name,
+	//		Price:      item.Price,
+	//		ImageURL:   getImageURL(item.ImageName),
+	//		CategoryID: item.CategoryID,
+	//		Category:   &category,
+	//		CreatedAt:  item.CreatedAt.Unix(),
+	//	})
+	//}
+
+	for _, item := range itemsWithUserAndCategory {
 		itemSimples = append(itemSimples, ItemSimple{
-			ID:         item.ID,
-			SellerID:   item.SellerID,
-			Seller:     &seller,
-			Status:     item.Status,
-			Name:       item.Name,
-			Price:      item.Price,
-			ImageURL:   getImageURL(item.ImageName),
-			CategoryID: item.CategoryID,
-			Category:   &category,
-			CreatedAt:  item.CreatedAt.Unix(),
+			ID:       item.Item.ID,
+			SellerID: item.Item.SellerID,
+			Seller: &UserSimple{
+				ID:           item.User.ID,
+				AccountName:  item.User.AccountName,
+				NumSellItems: item.User.NumSellItems,
+			},
+			Status:     item.Item.Status,
+			Name:       item.Item.Name,
+			Price:      item.Item.Price,
+			ImageURL:   getImageURL(item.Item.ImageName),
+			CategoryID: item.Item.CategoryID,
+			Category: &Category{
+				ID:                 item.Category.ID,
+				ParentID:           item.Category.ParentID,
+				CategoryName:       item.Category.CategoryName,
+				ParentCategoryName: item.ParentCategoryName,
+			},
+			CreatedAt: item.Item.CreatedAt.Unix(),
 		})
 	}
 
@@ -596,6 +677,25 @@ func getNewItems(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json;charset=utf-8")
 	json.NewEncoder(w).Encode(rni)
+}
+
+func getColumns(targetStruct interface{}, tableName string) string {
+	fields := reflect.TypeOf(targetStruct)
+
+	var itemColumns []string
+	for i := 0; i < fields.NumField(); i++ {
+		field := fields.Field(i)
+		columnTag := field.Tag.Get("db")
+
+		if columnTag != "-" {
+			columnName := "`" + tableName + "`" + "." + "`" + columnTag + "`" + " AS \"" + tableName + "." + columnTag + "\""
+			itemColumns = append(itemColumns, columnName)
+		}
+	}
+
+	join := strings.Join(itemColumns, ",")
+
+	return join
 }
 
 func getNewCategoryItems(w http.ResponseWriter, r *http.Request) {
