@@ -722,7 +722,13 @@ func getNewItems(w http.ResponseWriter, r *http.Request) {
 	// 		CreatedAt:  item.CreatedAt.Unix(),
 	// 	})
 	// }
-	for _, item := range items {
+	hasNext := false
+	for i, item := range items {
+		if i == ItemsPerPage {
+			hasNext = true
+			break
+		}
+
 		seller := UserSimple{
 			ID:           item.SellerID,
 			AccountName:  item.AccountName,
@@ -748,11 +754,11 @@ func getNewItems(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	hasNext := false
-	if len(itemSimples) > ItemsPerPage {
-		hasNext = true
-		itemSimples = itemSimples[0:ItemsPerPage]
-	}
+	// hasNext := false
+	// if len(itemSimples) > ItemsPerPage {
+	// 	hasNext = true
+	// 	itemSimples = itemSimples[0:ItemsPerPage]
+	// }
 
 	rni := resNewItems{
 		Items:   itemSimples,
@@ -857,7 +863,12 @@ func getNewCategoryItems(w http.ResponseWriter, r *http.Request) {
 	}
 
 	itemSimples := []ItemSimple{}
-	for _, item := range items {
+	hasNext := false
+	for i, item := range items {
+		if i == ItemsPerPage {
+			hasNext = true
+			break
+		}
 		// seller, err := getUserSimpleByID(dbx, item.SellerID)
 		// if err != nil {
 		// 	outputErrorMsg(w, http.StatusNotFound, "seller not found")
@@ -893,11 +904,11 @@ func getNewCategoryItems(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	hasNext := false
-	if len(itemSimples) > ItemsPerPage {
-		hasNext = true
-		itemSimples = itemSimples[0:ItemsPerPage]
-	}
+	// hasNext := false
+	// if len(itemSimples) > ItemsPerPage {
+	// 	hasNext = true
+	// 	itemSimples = itemSimples[0:ItemsPerPage]
+	// }
 
 	rni := resNewItems{
 		RootCategoryID:   rootCategory.ID,
@@ -919,11 +930,11 @@ func getUserItems(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userSimple, err := getUserSimpleByID(dbx, userID)
-	if err != nil {
-		outputErrorMsg(w, http.StatusNotFound, "user not found")
-		return
-	}
+	// userSimple, err := getUserSimpleByID(dbx, userID)
+	// if err != nil {
+	// 	outputErrorMsg(w, http.StatusNotFound, "user not found")
+	// 	return
+	// }
 
 	query := r.URL.Query()
 	itemIDStr := query.Get("item_id")
@@ -946,12 +957,16 @@ func getUserItems(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	items := []Item{}
+	// items := []Item{}
+	items := []JoinedItem{}
 	if itemID > 0 && createdAt > 0 {
 		// paging
 		err := dbx.Select(&items,
-			"SELECT * FROM `items` WHERE `seller_id` = ? AND `status` IN (?,?,?) AND (`created_at` < ?  OR (`created_at` <= ? AND `id` < ?)) ORDER BY `created_at` DESC, `id` DESC LIMIT ?",
-			userSimple.ID,
+			// "SELECT * FROM `items` WHERE `seller_id` = ? AND `status` IN (?,?,?) AND (`created_at` < ?  OR (`created_at` <= ? AND `id` < ?)) ORDER BY `created_at` DESC, `id` DESC LIMIT ?",
+			// userSimple.ID,
+			itemBaseSQL+
+				" WHERE items.seller_id = ? AND items.status IN (?,?,?) AND (items.created_at < ?  OR (items.created_at <= ? AND items.id < ?)) ORDER BY items.created_at DESC, items.id DESC LIMIT ?",
+			userID,
 			ItemStatusOnSale,
 			ItemStatusTrading,
 			ItemStatusSoldOut,
@@ -968,8 +983,11 @@ func getUserItems(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// 1st page
 		err := dbx.Select(&items,
-			"SELECT * FROM `items` WHERE `seller_id` = ? AND `status` IN (?,?,?) ORDER BY `created_at` DESC, `id` DESC LIMIT ?",
-			userSimple.ID,
+			// "SELECT * FROM `items` WHERE `seller_id` = ? AND `status` IN (?,?,?) ORDER BY `created_at` DESC, `id` DESC LIMIT ?",
+			// userSimple.ID,
+			itemBaseSQL+
+				" WHERE items.seller_id = ? AND items.status IN (?,?,?) ORDER BY items.created_at DESC, items.id DESC LIMIT ?",
+			userID,
 			ItemStatusOnSale,
 			ItemStatusTrading,
 			ItemStatusSoldOut,
@@ -982,6 +1000,7 @@ func getUserItems(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	userSimple := UserSimple{}
 	hasNext := false
 	itemSimples := []ItemSimple{}
 	for i, item := range items {
@@ -990,10 +1009,19 @@ func getUserItems(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
-		category, err := getCategoryByID(dbx, item.CategoryID)
-		if err != nil {
-			outputErrorMsg(w, http.StatusNotFound, "category not found")
-			return
+		// category, err := getCategoryByID(dbx, item.CategoryID)
+		// if err != nil {
+		// 	outputErrorMsg(w, http.StatusNotFound, "category not found")
+		// 	return
+		// }
+		userSimple.ID = item.SellerID
+		userSimple.AccountName = item.AccountName
+		userSimple.NumSellItems = item.NumSellItems
+		category := Category{
+			ID:                 item.CategoryID,
+			CategoryName:       item.CategoryName,
+			ParentID:           item.ParentID,
+			ParentCategoryName: item.ParentCategoryName,
 		}
 		itemSimples = append(itemSimples, ItemSimple{
 			ID:         item.ID,
@@ -1165,7 +1193,13 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 	wg := &sync.WaitGroup{}
 	mux := sync.Mutex{}
 	limit := make(chan struct{}, 20)
-	for _, item := range items {
+	hasNext := false
+	for i, item := range items {
+		if i == TransactionsPerPage {
+			hasNext = true
+			break
+		}
+
 		wg.Add(1)
 		go func(item getTransactionsDTO) {
 			limit <- struct{}{}
@@ -1293,11 +1327,11 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 
 	sort.Slice(itemDetails, func(i, j int) bool { return itemDetails[i].CreatedAt > itemDetails[j].CreatedAt })
 
-	hasNext := false
-	if len(itemDetails) > TransactionsPerPage {
-		hasNext = true
-		itemDetails = itemDetails[0:TransactionsPerPage]
-	}
+	// hasNext := false
+	// if len(itemDetails) > TransactionsPerPage {
+	// 	hasNext = true
+	// 	itemDetails = itemDetails[0:TransactionsPerPage]
+	// }
 
 	rts := resTransactions{
 		Items:   itemDetails,
