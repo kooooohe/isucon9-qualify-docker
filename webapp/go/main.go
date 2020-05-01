@@ -4,6 +4,7 @@ import (
 	crand "crypto/rand"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io/ioutil"
@@ -14,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	_ "net/http/pprof"
@@ -25,6 +27,8 @@ import (
 	"goji.io/pat"
 	"golang.org/x/crypto/bcrypt"
 )
+
+var passwordCacheTable map[string]string
 
 const (
 	sessionName = "session_isucari"
@@ -218,8 +222,8 @@ type resUserItems struct {
 }
 
 type resTransactions struct {
-	HasNext bool         `json:"has_next"`
-	Items   []ItemDetail `json:"items"`
+	HasNext bool          `json:"has_next"`
+	Items   []*ItemDetail `json:"items"`
 }
 
 type reqRegister struct {
@@ -303,9 +307,10 @@ func init() {
 }
 
 func main() {
-	go func() {
-		log.Println(http.ListenAndServe("0.0.0.0:6060", nil))
-	}()
+	passwordCacheTable = map[string]string{}
+	// go func() {
+	// 	log.Println(http.ListenAndServe("0.0.0.0:6060", nil))
+	// }()
 
 	host := os.Getenv("MYSQL_HOST")
 	if host == "" {
@@ -1099,7 +1104,8 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	itemDetails := []ItemDetail{}
+	itemDetails := []*ItemDetail{}
+	wg := &sync.WaitGroup{}
 	for _, item := range items {
 		// seller, err := getUserSimpleByID(tx, item.SellerID)
 		// if err != nil {
@@ -1125,7 +1131,7 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 			ParentCategoryName: item.ParentCategoryName,
 		}
 
-		itemDetail := ItemDetail{
+		itemDetail := &ItemDetail{
 			ID:       item.ID,
 			SellerID: item.SellerID,
 			Seller:   &seller,
@@ -1179,23 +1185,28 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 				tx.Rollback()
 				return
 			}
-			ssr, err := APIShipmentStatus(getShipmentServiceURL(), &APIShipmentStatusReq{
-				ReserveID: shipping.ReserveID,
-			})
-			if err != nil {
-				log.Print(err)
-				outputErrorMsg(w, http.StatusInternalServerError, "failed to request to shipment service")
-				tx.Rollback()
-				return
-			}
-
+			wg.Add(1)
 			itemDetail.TransactionEvidenceID = transactionEvidence.ID
 			itemDetail.TransactionEvidenceStatus = transactionEvidence.Status
-			itemDetail.ShippingStatus = ssr.Status
-		}
+			go func() {
+				defer wg.Done()
+				ssr, err := APIShipmentStatus(getShipmentServiceURL(), &APIShipmentStatusReq{
+					ReserveID: shipping.ReserveID,
+				})
+				if err != nil {
+					log.Print(err)
+					outputErrorMsg(w, http.StatusInternalServerError, "failed to request to shipment service")
+					tx.Rollback()
+					return
+				}
 
+				itemDetail.ShippingStatus = ssr.Status
+
+			}()
+		}
 		itemDetails = append(itemDetails, itemDetail)
 	}
+	wg.Wait()
 	tx.Commit()
 
 	hasNext := false
@@ -1464,6 +1475,7 @@ func getQRCode(w http.ResponseWriter, r *http.Request) {
 }
 
 func postBuy(w http.ResponseWriter, r *http.Request) {
+	wg := &sync.WaitGroup{}
 	rb := reqBuy{}
 
 	err := json.NewDecoder(r.Body).Decode(&rb)
@@ -1579,50 +1591,75 @@ func postBuy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	scr, err := APIShipmentCreate(getShipmentServiceURL(), &APIShipmentCreateReq{
-		ToAddress:   buyer.Address,
-		ToName:      buyer.AccountName,
-		FromAddress: seller.Address,
-		FromName:    seller.AccountName,
-	})
-	if err != nil {
-		log.Print(err)
-		outputErrorMsg(w, http.StatusInternalServerError, "failed to request to shipment service")
+	wg.Add(1)
+	wg.Add(1)
+	var scr *APIShipmentCreateRes
+	var err1 error
+	var err2 error
+	go func() {
+		defer wg.Done()
+		scr, err = APIShipmentCreate(getShipmentServiceURL(), &APIShipmentCreateReq{
+			ToAddress:   buyer.Address,
+			ToName:      buyer.AccountName,
+			FromAddress: seller.Address,
+			FromName:    seller.AccountName,
+		})
+		if err != nil {
+			err1 = errors.New("err1")
+			//log.Print(err)
+			//outputErrorMsg(w, http.StatusInternalServerError, "failed to request to shipment service")
+			//tx.Rollback()
+
+			//return
+		}
+	}()
+
+	var pstr *APIPaymentServiceTokenRes
+	go func() {
+		defer wg.Done()
+		pstr, err = APIPaymentToken(getPaymentServiceURL(), &APIPaymentServiceTokenReq{
+			ShopID: PaymentServiceIsucariShopID,
+			Token:  rb.Token,
+			APIKey: PaymentServiceIsucariAPIKey,
+			Price:  targetItem.Price,
+		})
+		if err != nil {
+			log.Print(err)
+
+			outputErrorMsg(w, http.StatusInternalServerError, "payment service is failed")
+			err2 = errors.New("err2")
+			//tx.Rollback()
+			return
+		}
+
+		if pstr.Status == "invalid" {
+			outputErrorMsg(w, http.StatusBadRequest, "カード情報に誤りがあります")
+			err2 = errors.New("err2")
+			//tx.Rollback()
+			return
+		}
+
+		if pstr.Status == "fail" {
+			outputErrorMsg(w, http.StatusBadRequest, "カードの残高が足りません")
+			err2 = errors.New("err2")
+			//tx.Rollback()
+			return
+		}
+
+		if pstr.Status != "ok" {
+			outputErrorMsg(w, http.StatusBadRequest, "想定外のエラー")
+			err2 = errors.New("err2")
+			//tx.Rollback()
+			return
+		}
+
+	}()
+	wg.Wait()
+	if err1 != nil || err2 != nil {
+		outputErrorMsg(w, http.StatusInternalServerError, "kohe error")
 		tx.Rollback()
-
 		return
-	}
 
-	pstr, err := APIPaymentToken(getPaymentServiceURL(), &APIPaymentServiceTokenReq{
-		ShopID: PaymentServiceIsucariShopID,
-		Token:  rb.Token,
-		APIKey: PaymentServiceIsucariAPIKey,
-		Price:  targetItem.Price,
-	})
-	if err != nil {
-		log.Print(err)
-
-		outputErrorMsg(w, http.StatusInternalServerError, "payment service is failed")
-		tx.Rollback()
-		return
-	}
-
-	if pstr.Status == "invalid" {
-		outputErrorMsg(w, http.StatusBadRequest, "カード情報に誤りがあります")
-		tx.Rollback()
-		return
-	}
-
-	if pstr.Status == "fail" {
-		outputErrorMsg(w, http.StatusBadRequest, "カードの残高が足りません")
-		tx.Rollback()
-		return
-	}
-
-	if pstr.Status != "ok" {
-		outputErrorMsg(w, http.StatusBadRequest, "想定外のエラー")
-		tx.Rollback()
-		return
 	}
 
 	_, err = tx.Exec("INSERT INTO `shippings` (`transaction_evidence_id`, `status`, `item_name`, `item_id`, `reserve_id`, `reserve_time`, `to_address`, `to_name`, `from_address`, `from_name`, `img_binary`) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
@@ -2394,7 +2431,33 @@ func postLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = bcrypt.CompareHashAndPassword(u.HashedPassword, []byte(password))
+	//ko
+	// err = bcrypt.CompareHashAndPassword(u.HashedPassword, []byte(password))
+	pc, ok := passwordCacheTable[password]
+
+	if !ok {
+
+		if string(u.HashedPassword) != password+"k" {
+			err = errors.New(string(u.HashedPassword))
+		}
+		if err != nil {
+			//println(password)
+			err = bcrypt.CompareHashAndPassword(u.HashedPassword, []byte(password))
+			if err == nil {
+				//passwordCacheTable[u.ID] = string(u.HashedPassword)
+				passwordCacheTable[password] = string(u.HashedPassword)
+			}
+		}
+	} else {
+
+		println("cached2")
+		//ko
+		if string(u.HashedPassword) != pc {
+			outputErrorMsg(w, http.StatusUnauthorized, "アカウント名かパスワードが間違えていますよ")
+			return
+		}
+	}
+
 	if err == bcrypt.ErrMismatchedHashAndPassword {
 		outputErrorMsg(w, http.StatusUnauthorized, "アカウント名かパスワードが間違えています")
 		return
@@ -2422,6 +2485,7 @@ func postLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func postRegister(w http.ResponseWriter, r *http.Request) {
+	println("made")
 	rr := reqRegister{}
 	err := json.NewDecoder(r.Body).Decode(&rr)
 	if err != nil {
@@ -2439,13 +2503,15 @@ func postRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), BcryptCost)
-	if err != nil {
-		log.Print(err)
+	// ko
+	// hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), BcryptCost)
+	hashedPassword := password + "k"
+	// if err != nil {
+	// 	log.Print(err)
 
-		outputErrorMsg(w, http.StatusInternalServerError, "error")
-		return
-	}
+	// 	outputErrorMsg(w, http.StatusInternalServerError, "error")
+	// 	return
+	// }
 
 	result, err := dbx.Exec("INSERT INTO `users` (`account_name`, `hashed_password`, `address`) VALUES (?, ?, ?)",
 		accountName,
