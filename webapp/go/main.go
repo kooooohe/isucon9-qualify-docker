@@ -984,8 +984,14 @@ func getUserItems(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	hasNext := false
 	itemSimples := []ItemSimple{}
-	for _, item := range items {
+	for i, item := range items {
+		if i == ItemsPerPage {
+			hasNext = true
+			break
+		}
+
 		category, err := getCategoryByID(dbx, item.CategoryID)
 		if err != nil {
 			outputErrorMsg(w, http.StatusNotFound, "category not found")
@@ -1005,11 +1011,11 @@ func getUserItems(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	hasNext := false
-	if len(itemSimples) > ItemsPerPage {
-		hasNext = true
-		itemSimples = itemSimples[0:ItemsPerPage]
-	}
+	// hasNext := false
+	// if len(itemSimples) > ItemsPerPage {
+	// 	hasNext = true
+	// 	itemSimples = itemSimples[0:ItemsPerPage]
+	// }
 
 	rui := resUserItems{
 		User:    &userSimple,
