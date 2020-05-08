@@ -4,6 +4,7 @@ import (
 	crand "crypto/rand"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io/ioutil"
@@ -220,8 +221,8 @@ type resUserItems struct {
 }
 
 type resTransactions struct {
-	HasNext bool         `json:"has_next"`
-	Items   []ItemDetail `json:"items"`
+	HasNext bool          `json:"has_next"`
+	Items   []*ItemDetail `json:"items"`
 }
 
 type reqRegister struct {
@@ -1188,7 +1189,7 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	itemDetails := []ItemDetail{}
+	itemDetails := []*ItemDetail{}
 
 	wg := &sync.WaitGroup{}
 	mux := sync.Mutex{}
@@ -1236,7 +1237,7 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 					NumSellItems: *item.BuyerNumSellItems,
 				}
 			}
-			itemDetail := ItemDetail{
+			itemDetail := &ItemDetail{
 				ID:          item.ID,
 				SellerID:    item.SellerID,
 				Seller:      &seller,
@@ -1299,6 +1300,10 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 					tx.Rollback()
 					return
 				}
+
+				itemDetail.TransactionEvidenceID = *item.TransactionEvidenceID
+				itemDetail.TransactionEvidenceStatus = *item.TransactionEvidenceStatus
+
 				ssr, err := APIShipmentStatus(getShipmentServiceURL(), &APIShipmentStatusReq{
 					ReserveID: *item.ReserveID,
 				})
@@ -1308,9 +1313,6 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 					tx.Rollback()
 					return
 				}
-
-				itemDetail.TransactionEvidenceID = *item.TransactionEvidenceID
-				itemDetail.TransactionEvidenceStatus = *item.TransactionEvidenceStatus
 				itemDetail.ShippingStatus = ssr.Status
 			}
 
@@ -1381,7 +1383,7 @@ func getItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	itemDetail := ItemDetail{
+	itemDetail := &ItemDetail{
 		ID:       item.ID,
 		SellerID: item.SellerID,
 		Seller:   &seller,
@@ -1708,48 +1710,71 @@ func postBuy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	scr, err := APIShipmentCreate(getShipmentServiceURL(), &APIShipmentCreateReq{
-		ToAddress:   buyer.Address,
-		ToName:      buyer.AccountName,
-		FromAddress: seller.Address,
-		FromName:    seller.AccountName,
-	})
-	if err != nil {
-		log.Print(err)
-		outputErrorMsg(w, http.StatusInternalServerError, "failed to request to shipment service")
-		tx.Rollback()
+	wg := &sync.WaitGroup{}
+	var scr *APIShipmentCreateRes
+	var err1 error
+	var err2 error
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		scr, err = APIShipmentCreate(getShipmentServiceURL(), &APIShipmentCreateReq{
+			ToAddress:   buyer.Address,
+			ToName:      buyer.AccountName,
+			FromAddress: seller.Address,
+			FromName:    seller.AccountName,
+		})
+		if err != nil {
+			err1 = err
+			//log.Print(err)
+			//outputErrorMsg(w, http.StatusInternalServerError, "failed to request to shipment service")
+			//tx.Rollback()
+		}
 
-		return
-	}
+	}()
 
-	pstr, err := APIPaymentToken(getPaymentServiceURL(), &APIPaymentServiceTokenReq{
-		ShopID: PaymentServiceIsucariShopID,
-		Token:  rb.Token,
-		APIKey: PaymentServiceIsucariAPIKey,
-		Price:  targetItem.Price,
-	})
-	if err != nil {
-		log.Print(err)
+	var pstr *APIPaymentServiceTokenRes
+	go func() {
+		defer wg.Done()
+		pstr, err = APIPaymentToken(getPaymentServiceURL(), &APIPaymentServiceTokenReq{
+			ShopID: PaymentServiceIsucariShopID,
+			Token:  rb.Token,
+			APIKey: PaymentServiceIsucariAPIKey,
+			Price:  targetItem.Price,
+		})
+		if err != nil {
+			log.Print(err)
 
-		outputErrorMsg(w, http.StatusInternalServerError, "payment service is failed")
-		tx.Rollback()
-		return
-	}
+			err2 = errors.New("err2")
+			outputErrorMsg(w, http.StatusInternalServerError, "payment service is failed")
+			//tx.Rollback()
+			return
+		}
 
-	if pstr.Status == "invalid" {
-		outputErrorMsg(w, http.StatusBadRequest, "カード情報に誤りがあります")
-		tx.Rollback()
-		return
-	}
+		if pstr.Status == "invalid" {
+			err2 = errors.New("err2")
+			outputErrorMsg(w, http.StatusBadRequest, "カード情報に誤りがあります")
+			// tx.Rollback()
+			return
+		}
 
-	if pstr.Status == "fail" {
-		outputErrorMsg(w, http.StatusBadRequest, "カードの残高が足りません")
-		tx.Rollback()
-		return
-	}
+		if pstr.Status == "fail" {
+			err2 = errors.New("err2")
+			outputErrorMsg(w, http.StatusBadRequest, "カードの残高が足りません")
+			//tx.Rollback()
+			return
+		}
 
-	if pstr.Status != "ok" {
-		outputErrorMsg(w, http.StatusBadRequest, "想定外のエラー")
+		if pstr.Status != "ok" {
+			err2 = errors.New("err2")
+			outputErrorMsg(w, http.StatusBadRequest, "想定外のエラー")
+			//tx.Rollback()
+			return
+		}
+	}()
+
+	wg.Wait()
+	if err1 != nil || err2 != nil {
+		outputErrorMsg(w, http.StatusInternalServerError, "kohe error")
 		tx.Rollback()
 		return
 	}
