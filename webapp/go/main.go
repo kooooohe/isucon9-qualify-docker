@@ -126,6 +126,35 @@ type JoinedItem struct {
 	ParentCategoryName string `json:"parent_category_name,omitempty" db:"parent_category_name"`
 }
 
+type JoinedItemV2 struct {
+	ID          int64     `json:"id" db:"id"`
+	SellerID    int64     `json:"seller_id" db:"seller_id"`
+	BuyerID     int64     `json:"buyer_id" db:"buyer_id"`
+	Status      string    `json:"status" db:"status"`
+	Name        string    `json:"name" db:"name"`
+	Price       int       `json:"price" db:"price"`
+	Description string    `json:"description" db:"description"`
+	ImageName   string    `json:"image_name" db:"image_name"`
+	CategoryID  int       `json:"category_id" db:"category_id"`
+	CreatedAt   time.Time `json:"-" db:"created_at"`
+	UpdatedAt   time.Time `json:"-" db:"updated_at"`
+	// sellers
+	SellerAccountName  sql.NullString `json:"seller_account_name" db:"seller_account_name"`
+	SellerNumSellItems sql.NullInt64  `json:"seller_num_sell_items" db:"seller_num_sell_items"`
+	// buyers
+	BuyerAccountName  sql.NullString `json:"buyer_account_name,omitempty" db:"buyer_account_name"`
+	BuyerNumSellItems sql.NullInt64  `json:"buyer_num_sell_items,omitempty" db:"buyer_num_sell_items"`
+	// categories
+	ParentID           int    `json:"parent_id" db:"parent_id"`
+	CategoryName       string `json:"category_name" db:"category_name"`
+	ParentCategoryName string `json:"parent_category_name,omitempty" db:"parent_category_name"`
+	// transaction_evidences
+	TransactionEvidenceID     sql.NullInt64  `json:"transaction_evidence_id,omitempty" db:"transaction_evidence_id"`
+	TransactionEvidenceStatus sql.NullString `json:"transaction_evidence_status,omitempty" db:"transaction_evidence_status"`
+	// shippings
+	ShippingStatus sql.NullString `json:"shipping_status,omitempty" db:"shipping_status"`
+}
+
 type ItemSimple struct {
 	ID         int64       `json:"id"`
 	SellerID   int64       `json:"seller_id"`
@@ -550,6 +579,14 @@ const itemBaseSQL = "SELECT items.*, users.account_name, users.num_sell_items, c
 	" LEFT JOIN `users` ON items.seller_id = users.id" +
 	" LEFT JOIN `categories` ON items.category_id = categories.id" +
 	" LEFT JOIN `categories` AS parent_categories ON categories.parent_id = parent_categories.id"
+
+const itemBaseSQLV2 = "SELECT items.*, sellers.account_name AS seller_account_name, sellers.num_sell_items AS seller_num_sell_items, buyers.account_name AS buyer_account_name, buyers.num_sell_items AS buyer_num_sell_items, categories.parent_id, categories.category_name, parent_categories.category_name AS parent_category_name, transaction_evidences.id AS transaction_evidence_id, transaction_evidences.status AS transaction_evidence_status, shippings.status AS shipping_status FROM `items`" +
+	" LEFT JOIN `users` AS sellers ON items.seller_id = sellers.id" +
+	" LEFT JOIN `users` AS buyers ON items.buyer_id = buyers.id" +
+	" LEFT JOIN `categories` ON items.category_id = categories.id" +
+	" LEFT JOIN `categories` AS parent_categories ON categories.parent_id = parent_categories.id" +
+	" LEFT JOIN `transaction_evidences` ON items.id = transaction_evidences.item_id" +
+	" LEFT JOIN `shippings` ON transaction_evidences.id = shippings.transaction_evidence_id"
 
 func postInitialize(w http.ResponseWriter, r *http.Request) {
 	ri := reqInitialize{}
@@ -1351,14 +1388,62 @@ func getItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, errCode, errMsg := getUser(r)
-	if errMsg != "" {
-		outputErrorMsg(w, errCode, errMsg)
-		return
-	}
+	// user, errCode, errMsg := getUser(r)
+	// if errMsg != "" {
+	// 	outputErrorMsg(w, errCode, errMsg)
+	// 	return
+	// }
 
-	item := Item{}
-	err = dbx.Get(&item, "SELECT * FROM `items` WHERE `id` = ?", itemID)
+	// item := Item{}
+	// err = dbx.Get(&item, "SELECT * FROM `items` WHERE `id` = ?", itemID)
+	// if err == sql.ErrNoRows {
+	// 	outputErrorMsg(w, http.StatusNotFound, "item not found")
+	// 	return
+	// }
+	// if err != nil {
+	// 	log.Print(err)
+	// 	outputErrorMsg(w, http.StatusInternalServerError, "db error")
+	// 	return
+	// }
+
+	// category, err := getCategoryByID(dbx, item.CategoryID)
+	// if err != nil {
+	// 	outputErrorMsg(w, http.StatusNotFound, "category not found")
+	// 	return
+	// }
+
+	// seller, err := getUserSimpleByID(dbx, item.SellerID)
+	// if err != nil {
+	// 	outputErrorMsg(w, http.StatusNotFound, "seller not found")
+	// 	return
+	// }
+
+	// itemDetail := ItemDetail{
+	// 	ID:       item.ID,
+	// 	SellerID: item.SellerID,
+	// 	Seller:   &seller,
+	// 	// BuyerID
+	// 	// Buyer
+	// 	Status:      item.Status,
+	// 	Name:        item.Name,
+	// 	Price:       item.Price,
+	// 	Description: item.Description,
+	// 	ImageURL:    getImageURL(item.ImageName),
+	// 	CategoryID:  item.CategoryID,
+	// 	// TransactionEvidenceID
+	// 	// TransactionEvidenceStatus
+	// 	// ShippingStatus
+	// 	Category:  &category,
+	// 	CreatedAt: item.CreatedAt.Unix(),
+	// }
+
+	item := JoinedItemV2{}
+	err = dbx.Get(
+		&item,
+		itemBaseSQLV2+
+			" WHERE items.id = ?",
+		itemID,
+	)
 	if err == sql.ErrNoRows {
 		outputErrorMsg(w, http.StatusNotFound, "item not found")
 		return
@@ -1369,73 +1454,77 @@ func getItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	category, err := getCategoryByID(dbx, item.CategoryID)
-	if err != nil {
-		outputErrorMsg(w, http.StatusNotFound, "category not found")
-		return
+	seller := UserSimple{
+		ID:           item.SellerID,
+		AccountName:  item.SellerAccountName.String,
+		NumSellItems: int(item.SellerNumSellItems.Int64),
 	}
-
-	seller, err := getUserSimpleByID(dbx, item.SellerID)
-	if err != nil {
-		outputErrorMsg(w, http.StatusNotFound, "seller not found")
-		return
+	buyer := UserSimple{
+		ID:           item.BuyerID,
+		AccountName:  item.BuyerAccountName.String,
+		NumSellItems: int(item.BuyerNumSellItems.Int64),
 	}
-
+	category := Category{
+		ID:                 item.CategoryID,
+		ParentID:           item.ParentID,
+		CategoryName:       item.CategoryName,
+		ParentCategoryName: item.ParentCategoryName,
+	}
 	itemDetail := ItemDetail{
-		ID:       item.ID,
-		SellerID: item.SellerID,
-		Seller:   &seller,
-		// BuyerID
-		// Buyer
-		Status:      item.Status,
-		Name:        item.Name,
-		Price:       item.Price,
-		Description: item.Description,
-		ImageURL:    getImageURL(item.ImageName),
-		CategoryID:  item.CategoryID,
-		// TransactionEvidenceID
-		// TransactionEvidenceStatus
-		// ShippingStatus
-		Category:  &category,
-		CreatedAt: item.CreatedAt.Unix(),
+		ID:                        item.ID,
+		SellerID:                  item.SellerID,
+		Seller:                    &seller,
+		BuyerID:                   item.BuyerID,
+		Buyer:                     &buyer,
+		Status:                    item.Status,
+		Name:                      item.Name,
+		Price:                     item.Price,
+		Description:               item.Description,
+		ImageURL:                  getImageURL(item.ImageName),
+		CategoryID:                item.CategoryID,
+		TransactionEvidenceID:     item.TransactionEvidenceID.Int64,
+		TransactionEvidenceStatus: item.TransactionEvidenceStatus.String,
+		ShippingStatus:            item.ShippingStatus.String,
+		Category:                  &category,
+		CreatedAt:                 item.CreatedAt.Unix(),
 	}
 
-	if (user.ID == item.SellerID || user.ID == item.BuyerID) && item.BuyerID != 0 {
-		buyer, err := getUserSimpleByID(dbx, item.BuyerID)
-		if err != nil {
-			outputErrorMsg(w, http.StatusNotFound, "buyer not found")
-			return
-		}
-		itemDetail.BuyerID = item.BuyerID
-		itemDetail.Buyer = &buyer
+	// if (user.ID == item.SellerID || user.ID == item.BuyerID) && item.BuyerID != 0 {
+	// 	buyer, err := getUserSimpleByID(dbx, item.BuyerID)
+	// 	if err != nil {
+	// 		outputErrorMsg(w, http.StatusNotFound, "buyer not found")
+	// 		return
+	// 	}
+	// 	itemDetail.BuyerID = item.BuyerID
+	// 	itemDetail.Buyer = &buyer
 
-		transactionEvidence := TransactionEvidence{}
-		err = dbx.Get(&transactionEvidence, "SELECT * FROM `transaction_evidences` WHERE `item_id` = ?", item.ID)
-		if err != nil && err != sql.ErrNoRows {
-			// It's able to ignore ErrNoRows
-			log.Print(err)
-			outputErrorMsg(w, http.StatusInternalServerError, "db error")
-			return
-		}
+	// 	transactionEvidence := TransactionEvidence{}
+	// 	err = dbx.Get(&transactionEvidence, "SELECT * FROM `transaction_evidences` WHERE `item_id` = ?", item.ID)
+	// 	if err != nil && err != sql.ErrNoRows {
+	// 		// It's able to ignore ErrNoRows
+	// 		log.Print(err)
+	// 		outputErrorMsg(w, http.StatusInternalServerError, "db error")
+	// 		return
+	// 	}
 
-		if transactionEvidence.ID > 0 {
-			shipping := Shipping{}
-			err = dbx.Get(&shipping, "SELECT * FROM `shippings` WHERE `transaction_evidence_id` = ?", transactionEvidence.ID)
-			if err == sql.ErrNoRows {
-				outputErrorMsg(w, http.StatusNotFound, "shipping not found")
-				return
-			}
-			if err != nil {
-				log.Print(err)
-				outputErrorMsg(w, http.StatusInternalServerError, "db error")
-				return
-			}
+	// 	if transactionEvidence.ID > 0 {
+	// 		shipping := Shipping{}
+	// 		err = dbx.Get(&shipping, "SELECT * FROM `shippings` WHERE `transaction_evidence_id` = ?", transactionEvidence.ID)
+	// 		if err == sql.ErrNoRows {
+	// 			outputErrorMsg(w, http.StatusNotFound, "shipping not found")
+	// 			return
+	// 		}
+	// 		if err != nil {
+	// 			log.Print(err)
+	// 			outputErrorMsg(w, http.StatusInternalServerError, "db error")
+	// 			return
+	// 		}
 
-			itemDetail.TransactionEvidenceID = transactionEvidence.ID
-			itemDetail.TransactionEvidenceStatus = transactionEvidence.Status
-			itemDetail.ShippingStatus = shipping.Status
-		}
-	}
+	// 		itemDetail.TransactionEvidenceID = transactionEvidence.ID
+	// 		itemDetail.TransactionEvidenceStatus = transactionEvidence.Status
+	// 		itemDetail.ShippingStatus = shipping.Status
+	// 	}
+	// }
 
 	w.Header().Set("Content-Type", "application/json;charset=utf-8")
 	json.NewEncoder(w).Encode(itemDetail)
