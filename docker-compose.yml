@@ -9,6 +9,8 @@ services:
     tty: true
     ports:
       - 8000:8000
+      - 8001:8001
+      - 6060:6060
     environment:
       - MYSQL_HOST=mysql
       - TZ=Asia/Tokyo
