@@ -12,8 +12,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
+
+	_ "net/http/pprof"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gorilla/sessions"
@@ -81,9 +86,9 @@ type User struct {
 }
 
 type UserSimple struct {
-	ID           int64  `json:"id"`
-	AccountName  string `json:"account_name"`
-	NumSellItems int    `json:"num_sell_items"`
+	ID           int64  `json:"id" db:"id"`
+	AccountName  string `json:"account_name" db:"account_name"`
+	NumSellItems int    `json:"num_sell_items" db:"num_sell_items"`
 }
 
 type Item struct {
@@ -98,6 +103,56 @@ type Item struct {
 	CategoryID  int       `json:"category_id" db:"category_id"`
 	CreatedAt   time.Time `json:"-" db:"created_at"`
 	UpdatedAt   time.Time `json:"-" db:"updated_at"`
+}
+
+type JoinedItem struct {
+	ID          int64     `json:"id" db:"id"`
+	SellerID    int64     `json:"seller_id" db:"seller_id"`
+	BuyerID     int64     `json:"buyer_id" db:"buyer_id"`
+	Status      string    `json:"status" db:"status"`
+	Name        string    `json:"name" db:"name"`
+	Price       int       `json:"price" db:"price"`
+	Description string    `json:"description" db:"description"`
+	ImageName   string    `json:"image_name" db:"image_name"`
+	CategoryID  int       `json:"category_id" db:"category_id"`
+	CreatedAt   time.Time `json:"-" db:"created_at"`
+	UpdatedAt   time.Time `json:"-" db:"updated_at"`
+	// users
+	AccountName  string `json:"account_name" db:"account_name"`
+	NumSellItems int    `json:"num_sell_items" db:"num_sell_items"`
+	// categories
+	ParentID           int    `json:"parent_id" db:"parent_id"`
+	CategoryName       string `json:"category_name" db:"category_name"`
+	ParentCategoryName string `json:"parent_category_name,omitempty" db:"parent_category_name"`
+}
+
+type JoinedItemV2 struct {
+	ID          int64     `json:"id" db:"id"`
+	SellerID    int64     `json:"seller_id" db:"seller_id"`
+	BuyerID     int64     `json:"buyer_id" db:"buyer_id"`
+	Status      string    `json:"status" db:"status"`
+	Name        string    `json:"name" db:"name"`
+	Price       int       `json:"price" db:"price"`
+	Description string    `json:"description" db:"description"`
+	ImageName   string    `json:"image_name" db:"image_name"`
+	CategoryID  int       `json:"category_id" db:"category_id"`
+	CreatedAt   time.Time `json:"-" db:"created_at"`
+	UpdatedAt   time.Time `json:"-" db:"updated_at"`
+	// sellers
+	SellerAccountName  sql.NullString `json:"seller_account_name" db:"seller_account_name"`
+	SellerNumSellItems sql.NullInt64  `json:"seller_num_sell_items" db:"seller_num_sell_items"`
+	// buyers
+	BuyerAccountName  sql.NullString `json:"buyer_account_name,omitempty" db:"buyer_account_name"`
+	BuyerNumSellItems sql.NullInt64  `json:"buyer_num_sell_items,omitempty" db:"buyer_num_sell_items"`
+	// categories
+	ParentID           int    `json:"parent_id" db:"parent_id"`
+	CategoryName       string `json:"category_name" db:"category_name"`
+	ParentCategoryName string `json:"parent_category_name,omitempty" db:"parent_category_name"`
+	// transaction_evidences
+	TransactionEvidenceID     sql.NullInt64  `json:"transaction_evidence_id,omitempty" db:"transaction_evidence_id"`
+	TransactionEvidenceStatus sql.NullString `json:"transaction_evidence_status,omitempty" db:"transaction_evidence_status"`
+	// shippings
+	ShippingStatus sql.NullString `json:"shipping_status,omitempty" db:"shipping_status"`
 }
 
 type ItemSimple struct {
@@ -279,6 +334,10 @@ func init() {
 }
 
 func main() {
+	go func() {
+		log.Println(http.ListenAndServe("0.0.0.0:6060", nil))
+	}()
+
 	host := os.Getenv("MYSQL_HOST")
 	if host == "" {
 		host = "127.0.0.1"
@@ -396,27 +455,91 @@ func getUser(r *http.Request) (user User, errCode int, errMsg string) {
 }
 
 func getUserSimpleByID(q sqlx.Queryer, userID int64) (userSimple UserSimple, err error) {
-	user := User{}
-	err = sqlx.Get(q, &user, "SELECT * FROM `users` WHERE `id` = ?", userID)
+	err = sqlx.Get(q, &userSimple, "SELECT id, account_name, num_sell_items FROM `users` WHERE `id` = ?", userID)
 	if err != nil {
 		return userSimple, err
 	}
-	userSimple.ID = user.ID
-	userSimple.AccountName = user.AccountName
-	userSimple.NumSellItems = user.NumSellItems
 	return userSimple, err
+}
+
+type UserSimpleMap map[int64]UserSimple
+
+func getUsersSimpleByID(q sqlx.Queryer, userIDs []string) (UserSimpleMap, error) {
+	users := make([]User, 0, len(userIDs))
+	err := sqlx.Select(q, &users, "SELECT * FROM `users` WHERE `id` in ("+strings.Join(userIDs, ",")+")")
+	if err != nil {
+		return nil, err
+	}
+	userSimples := make(UserSimpleMap, len(users))
+	for _, user := range users {
+		userSimples[user.ID] = UserSimple{
+			ID:           user.ID,
+			AccountName:  user.AccountName,
+			NumSellItems: user.NumSellItems,
+		}
+	}
+	return userSimples, nil
 }
 
 func getCategoryByID(q sqlx.Queryer, categoryID int) (category Category, err error) {
 	err = sqlx.Get(q, &category, "SELECT * FROM `categories` WHERE `id` = ?", categoryID)
 	if category.ParentID != 0 {
-		parentCategory, err := getCategoryByID(q, category.ParentID)
-		if err != nil {
-			return category, err
-		}
-		category.ParentCategoryName = parentCategory.CategoryName
+		ptmp := &Category{}
+		err = sqlx.Get(q, ptmp, "SELECT category_name FROM `categories` WHERE `id` = ?", category.ParentID)
+		//parentCategory, err := getCategoryByID(q, category.ParentID)
+		//if err != nil {
+		//	return category, err
+		//}
+		category.ParentCategoryName = ptmp.CategoryName
 	}
 	return category, err
+}
+
+type CategoryMap map[int]Category
+
+func getCategoriesByID(q sqlx.Queryer, categoryIDs []string) (CategoryMap, error) {
+	categories := make([]Category, 0, len(categoryIDs))
+	err := sqlx.Select(q, &categories, "SELECT * FROM `categories` WHERE `id` in ("+strings.Join(categoryIDs, ",")+")")
+	if err != nil {
+		return nil, err
+	}
+
+	parentIDMap := make(map[int]struct{}, len(categories))
+	for _, category := range categories {
+		if category.ParentID != 0 {
+			parentIDMap[category.ParentID] = struct{}{}
+		}
+	}
+
+	parentIDs := make([]string, 0, len(parentIDMap))
+	for parentID := range parentIDMap {
+		parentIDs = append(parentIDs, strconv.Itoa(parentID))
+	}
+
+	parentCategoryMap, err := getCategoriesByIDs(q, parentIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	categoryMap := make(CategoryMap, len(categories))
+	for _, category := range categories {
+		category.ParentCategoryName = parentCategoryMap[category.ParentID].CategoryName
+		categoryMap[category.ID] = category
+	}
+	return categoryMap, nil
+}
+
+func getCategoriesByIDs(q sqlx.Queryer, categoryIDs []string) (CategoryMap, error) {
+	categories := make([]Category, 0, len(categoryIDs))
+	err := sqlx.Select(q, &categories, "SELECT * FROM `categories` WHERE `id` in ("+strings.Join(categoryIDs, ",")+")")
+	if err != nil {
+		return nil, err
+	}
+	categoryMap := make(CategoryMap, len(categories))
+	for _, category := range categories {
+		categoryMap[category.ID] = category
+	}
+	return categoryMap, nil
 }
 
 func getConfigByName(name string) (string, error) {
@@ -451,6 +574,19 @@ func getShipmentServiceURL() string {
 func getIndex(w http.ResponseWriter, r *http.Request) {
 	templates.ExecuteTemplate(w, "index.html", struct{}{})
 }
+
+const itemBaseSQL = "SELECT items.*, users.account_name, users.num_sell_items, categories.parent_id, categories.category_name, parent_categories.category_name AS parent_category_name  FROM `items`" +
+	" LEFT JOIN `users` ON items.seller_id = users.id" +
+	" LEFT JOIN `categories` ON items.category_id = categories.id" +
+	" LEFT JOIN `categories` AS parent_categories ON categories.parent_id = parent_categories.id"
+
+const itemBaseSQLV2 = "SELECT items.*, sellers.account_name AS seller_account_name, sellers.num_sell_items AS seller_num_sell_items, buyers.account_name AS buyer_account_name, buyers.num_sell_items AS buyer_num_sell_items, categories.parent_id, categories.category_name, parent_categories.category_name AS parent_category_name, transaction_evidences.id AS transaction_evidence_id, transaction_evidences.status AS transaction_evidence_status, shippings.status AS shipping_status FROM `items`" +
+	" LEFT JOIN `users` AS sellers ON items.seller_id = sellers.id" +
+	" LEFT JOIN `users` AS buyers ON items.buyer_id = buyers.id" +
+	" LEFT JOIN `categories` ON items.category_id = categories.id" +
+	" LEFT JOIN `categories` AS parent_categories ON categories.parent_id = parent_categories.id" +
+	" LEFT JOIN `transaction_evidences` ON items.id = transaction_evidences.item_id" +
+	" LEFT JOIN `shippings` ON transaction_evidences.id = shippings.transaction_evidence_id"
 
 func postInitialize(w http.ResponseWriter, r *http.Request) {
 	ri := reqInitialize{}
@@ -525,11 +661,23 @@ func getNewItems(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	items := []Item{}
+	// items := []Item{}
+	items := []JoinedItem{}
 	if itemID > 0 && createdAt > 0 {
 		// paging
+		// err := dbx.Select(&items,
+		// 	"SELECT * FROM `items` WHERE `status` IN (?,?) AND (`created_at` < ?  OR (`created_at` <= ? AND `id` < ?)) ORDER BY `created_at` DESC, `id` DESC LIMIT ?",
+		// 	ItemStatusOnSale,
+		// 	ItemStatusSoldOut,
+		// 	time.Unix(createdAt, 0),
+		// 	time.Unix(createdAt, 0),
+		// 	itemID,
+		// 	ItemsPerPage+1,
+		// )
 		err := dbx.Select(&items,
-			"SELECT * FROM `items` WHERE `status` IN (?,?) AND (`created_at` < ?  OR (`created_at` <= ? AND `id` < ?)) ORDER BY `created_at` DESC, `id` DESC LIMIT ?",
+			itemBaseSQL+
+				" WHERE items.status IN (?,?) AND (items.created_at < ?  OR (items.created_at <= ? AND items.id < ?)) "+
+				" ORDER BY items.created_at DESC, items.id DESC LIMIT ?",
 			ItemStatusOnSale,
 			ItemStatusSoldOut,
 			time.Unix(createdAt, 0),
@@ -544,8 +692,15 @@ func getNewItems(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		// 1st page
+		// err := dbx.Select(&items,
+		// 	"SELECT items.* FROM `items` WHERE `status` IN (?,?) ORDER BY `created_at` DESC, `id` DESC LIMIT ?",
+		// 	ItemStatusOnSale,
+		// 	ItemStatusSoldOut,
+		// 	ItemsPerPage+1,
+		// )
 		err := dbx.Select(&items,
-			"SELECT * FROM `items` WHERE `status` IN (?,?) ORDER BY `created_at` DESC, `id` DESC LIMIT ?",
+			itemBaseSQL+
+				" WHERE items.status IN (?,?) ORDER BY items.created_at DESC, items.id DESC LIMIT ?",
 			ItemStatusOnSale,
 			ItemStatusSoldOut,
 			ItemsPerPage+1,
@@ -558,16 +713,69 @@ func getNewItems(w http.ResponseWriter, r *http.Request) {
 	}
 
 	itemSimples := []ItemSimple{}
-	for _, item := range items {
-		seller, err := getUserSimpleByID(dbx, item.SellerID)
-		if err != nil {
-			outputErrorMsg(w, http.StatusNotFound, "seller not found")
-			return
+
+	// sellerIDMap := make(map[int64]struct{})
+	// categoryIDMap := make(map[int]struct{})
+	// for _, item := range items {
+	// 	sellerIDMap[item.SellerID] = struct{}{}
+	// 	categoryIDMap[item.CategoryID] = struct{}{}
+	// }
+
+	// sellerIDs := make([]string, 0, len(sellerIDMap))
+	// categoryIDs := make([]string, 0, len(categoryIDMap))
+	// for sellerID := range sellerIDMap {
+	// 	sellerIDs = append(sellerIDs, strconv.FormatInt(sellerID, 10))
+	// }
+	// for categoryID := range categoryIDMap {
+	// 	categoryIDs = append(categoryIDs, strconv.Itoa(categoryID))
+	// }
+
+	// sellers, err := getUsersSimpleByID(dbx, sellerIDs)
+	// if err != nil {
+	// 	fmt.Println(err)
+	// 	outputErrorMsg(w, http.StatusNotFound, "seller not found")
+	// 	return
+	// }
+	// categoryMap, err := getCategoriesByID(dbx, categoryIDs)
+	// if err != nil {
+	// 	fmt.Println(err)
+	// 	outputErrorMsg(w, http.StatusNotFound, "category not found")
+	// 	return
+	// }
+
+	// for _, item := range items {
+	// 	seller := sellers[item.SellerID]
+	// 	category := categoryMap[item.CategoryID]
+	// 	itemSimples = append(itemSimples, ItemSimple{
+	// 		ID:         item.ID,
+	// 		SellerID:   item.SellerID,
+	// 		Seller:     &seller,
+	// 		Status:     item.Status,
+	// 		Name:       item.Name,
+	// 		Price:      item.Price,
+	// 		ImageURL:   getImageURL(item.ImageName),
+	// 		CategoryID: item.CategoryID,
+	// 		Category:   &category,
+	// 		CreatedAt:  item.CreatedAt.Unix(),
+	// 	})
+	// }
+	hasNext := false
+	for i, item := range items {
+		if i == ItemsPerPage {
+			hasNext = true
+			break
 		}
-		category, err := getCategoryByID(dbx, item.CategoryID)
-		if err != nil {
-			outputErrorMsg(w, http.StatusNotFound, "category not found")
-			return
+
+		seller := UserSimple{
+			ID:           item.SellerID,
+			AccountName:  item.AccountName,
+			NumSellItems: item.NumSellItems,
+		}
+		category := Category{
+			ID:                 item.CategoryID,
+			CategoryName:       item.CategoryName,
+			ParentID:           item.ParentID,
+			ParentCategoryName: item.ParentCategoryName,
 		}
 		itemSimples = append(itemSimples, ItemSimple{
 			ID:         item.ID,
@@ -583,11 +791,11 @@ func getNewItems(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	hasNext := false
-	if len(itemSimples) > ItemsPerPage {
-		hasNext = true
-		itemSimples = itemSimples[0:ItemsPerPage]
-	}
+	// hasNext := false
+	// if len(itemSimples) > ItemsPerPage {
+	// 	hasNext = true
+	// 	itemSimples = itemSimples[0:ItemsPerPage]
+	// }
 
 	rni := resNewItems{
 		Items:   itemSimples,
@@ -646,7 +854,10 @@ func getNewCategoryItems(w http.ResponseWriter, r *http.Request) {
 	if itemID > 0 && createdAt > 0 {
 		// paging
 		inQuery, inArgs, err = sqlx.In(
-			"SELECT * FROM `items` WHERE `status` IN (?,?) AND category_id IN (?) AND (`created_at` < ?  OR (`created_at` <= ? AND `id` < ?)) ORDER BY `created_at` DESC, `id` DESC LIMIT ?",
+			itemBaseSQL+
+				" WHERE items.status IN (?,?) AND items.category_id IN (?) AND (items.created_at < ?  OR (items.created_at <= ? AND items.id < ?)) "+
+				" ORDER BY items.created_at DESC, items.id DESC LIMIT ?",
+			// "SELECT * FROM `items` WHERE `status` IN (?,?) AND category_id IN (?) AND (`created_at` < ?  OR (`created_at` <= ? AND `id` < ?)) ORDER BY `created_at` DESC, `id` DESC LIMIT ?",
 			ItemStatusOnSale,
 			ItemStatusSoldOut,
 			categoryIDs,
@@ -663,7 +874,9 @@ func getNewCategoryItems(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// 1st page
 		inQuery, inArgs, err = sqlx.In(
-			"SELECT * FROM `items` WHERE `status` IN (?,?) AND category_id IN (?) ORDER BY created_at DESC, id DESC LIMIT ?",
+			itemBaseSQL+
+				" WHERE items.status IN (?,?) AND items.category_id IN (?) ORDER BY items.created_at DESC, items.id DESC LIMIT ?",
+			// "SELECT * FROM `items` WHERE `status` IN (?,?) AND category_id IN (?) ORDER BY created_at DESC, id DESC LIMIT ?",
 			ItemStatusOnSale,
 			ItemStatusSoldOut,
 			categoryIDs,
@@ -676,7 +889,8 @@ func getNewCategoryItems(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	items := []Item{}
+	items := []JoinedItem{}
+	// items := []Item{}
 	err = dbx.Select(&items, inQuery, inArgs...)
 
 	if err != nil {
@@ -686,16 +900,32 @@ func getNewCategoryItems(w http.ResponseWriter, r *http.Request) {
 	}
 
 	itemSimples := []ItemSimple{}
-	for _, item := range items {
-		seller, err := getUserSimpleByID(dbx, item.SellerID)
-		if err != nil {
-			outputErrorMsg(w, http.StatusNotFound, "seller not found")
-			return
+	hasNext := false
+	for i, item := range items {
+		if i == ItemsPerPage {
+			hasNext = true
+			break
 		}
-		category, err := getCategoryByID(dbx, item.CategoryID)
-		if err != nil {
-			outputErrorMsg(w, http.StatusNotFound, "category not found")
-			return
+		// seller, err := getUserSimpleByID(dbx, item.SellerID)
+		// if err != nil {
+		// 	outputErrorMsg(w, http.StatusNotFound, "seller not found")
+		// 	return
+		// }
+		// category, err := getCategoryByID(dbx, item.CategoryID)
+		// if err != nil {
+		// 	outputErrorMsg(w, http.StatusNotFound, "category not found")
+		// 	return
+		// }
+		seller := UserSimple{
+			ID:           item.SellerID,
+			AccountName:  item.AccountName,
+			NumSellItems: item.NumSellItems,
+		}
+		category := Category{
+			ID:                 item.CategoryID,
+			CategoryName:       item.CategoryName,
+			ParentID:           item.ParentID,
+			ParentCategoryName: item.ParentCategoryName,
 		}
 		itemSimples = append(itemSimples, ItemSimple{
 			ID:         item.ID,
@@ -711,11 +941,11 @@ func getNewCategoryItems(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	hasNext := false
-	if len(itemSimples) > ItemsPerPage {
-		hasNext = true
-		itemSimples = itemSimples[0:ItemsPerPage]
-	}
+	// hasNext := false
+	// if len(itemSimples) > ItemsPerPage {
+	// 	hasNext = true
+	// 	itemSimples = itemSimples[0:ItemsPerPage]
+	// }
 
 	rni := resNewItems{
 		RootCategoryID:   rootCategory.ID,
@@ -737,11 +967,11 @@ func getUserItems(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userSimple, err := getUserSimpleByID(dbx, userID)
-	if err != nil {
-		outputErrorMsg(w, http.StatusNotFound, "user not found")
-		return
-	}
+	// userSimple, err := getUserSimpleByID(dbx, userID)
+	// if err != nil {
+	// 	outputErrorMsg(w, http.StatusNotFound, "user not found")
+	// 	return
+	// }
 
 	query := r.URL.Query()
 	itemIDStr := query.Get("item_id")
@@ -764,12 +994,16 @@ func getUserItems(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	items := []Item{}
+	// items := []Item{}
+	items := []JoinedItem{}
 	if itemID > 0 && createdAt > 0 {
 		// paging
 		err := dbx.Select(&items,
-			"SELECT * FROM `items` WHERE `seller_id` = ? AND `status` IN (?,?,?) AND (`created_at` < ?  OR (`created_at` <= ? AND `id` < ?)) ORDER BY `created_at` DESC, `id` DESC LIMIT ?",
-			userSimple.ID,
+			// "SELECT * FROM `items` WHERE `seller_id` = ? AND `status` IN (?,?,?) AND (`created_at` < ?  OR (`created_at` <= ? AND `id` < ?)) ORDER BY `created_at` DESC, `id` DESC LIMIT ?",
+			// userSimple.ID,
+			itemBaseSQL+
+				" WHERE items.seller_id = ? AND items.status IN (?,?,?) AND (items.created_at < ?  OR (items.created_at <= ? AND items.id < ?)) ORDER BY items.created_at DESC, items.id DESC LIMIT ?",
+			userID,
 			ItemStatusOnSale,
 			ItemStatusTrading,
 			ItemStatusSoldOut,
@@ -786,8 +1020,11 @@ func getUserItems(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// 1st page
 		err := dbx.Select(&items,
-			"SELECT * FROM `items` WHERE `seller_id` = ? AND `status` IN (?,?,?) ORDER BY `created_at` DESC, `id` DESC LIMIT ?",
-			userSimple.ID,
+			// "SELECT * FROM `items` WHERE `seller_id` = ? AND `status` IN (?,?,?) ORDER BY `created_at` DESC, `id` DESC LIMIT ?",
+			// userSimple.ID,
+			itemBaseSQL+
+				" WHERE items.seller_id = ? AND items.status IN (?,?,?) ORDER BY items.created_at DESC, items.id DESC LIMIT ?",
+			userID,
 			ItemStatusOnSale,
 			ItemStatusTrading,
 			ItemStatusSoldOut,
@@ -800,12 +1037,28 @@ func getUserItems(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	userSimple := UserSimple{}
+	hasNext := false
 	itemSimples := []ItemSimple{}
-	for _, item := range items {
-		category, err := getCategoryByID(dbx, item.CategoryID)
-		if err != nil {
-			outputErrorMsg(w, http.StatusNotFound, "category not found")
-			return
+	for i, item := range items {
+		if i == ItemsPerPage {
+			hasNext = true
+			break
+		}
+
+		// category, err := getCategoryByID(dbx, item.CategoryID)
+		// if err != nil {
+		// 	outputErrorMsg(w, http.StatusNotFound, "category not found")
+		// 	return
+		// }
+		userSimple.ID = item.SellerID
+		userSimple.AccountName = item.AccountName
+		userSimple.NumSellItems = item.NumSellItems
+		category := Category{
+			ID:                 item.CategoryID,
+			CategoryName:       item.CategoryName,
+			ParentID:           item.ParentID,
+			ParentCategoryName: item.ParentCategoryName,
 		}
 		itemSimples = append(itemSimples, ItemSimple{
 			ID:         item.ID,
@@ -821,11 +1074,11 @@ func getUserItems(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	hasNext := false
-	if len(itemSimples) > ItemsPerPage {
-		hasNext = true
-		itemSimples = itemSimples[0:ItemsPerPage]
-	}
+	// hasNext := false
+	// if len(itemSimples) > ItemsPerPage {
+	// 	hasNext = true
+	// 	itemSimples = itemSimples[0:ItemsPerPage]
+	// }
 
 	rui := resUserItems{
 		User:    &userSimple,
@@ -836,6 +1089,63 @@ func getUserItems(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json;charset=utf-8")
 	json.NewEncoder(w).Encode(rui)
 }
+
+type getTransactionsDTO struct {
+	ID          int64     `json:"id" db:"id"`
+	SellerID    int64     `json:"seller_id" db:"seller_id"`
+	BuyerID     int64     `json:"buyer_id" db:"buyer_id"`
+	Status      string    `json:"status" db:"status"`
+	Name        string    `json:"name" db:"name"`
+	Price       int       `json:"price" db:"price"`
+	Description string    `json:"description" db:"description"`
+	ImageName   string    `json:"image_name" db:"image_name"`
+	CategoryID  int       `json:"category_id" db:"category_id"`
+	CreatedAt   time.Time `json:"-" db:"created_at"`
+	UpdatedAt   time.Time `json:"-" db:"updated_at"`
+	// users
+	AccountName  string `json:"account_name" db:"account_name"`
+	NumSellItems int    `json:"num_sell_items" db:"num_sell_items"`
+	// categories
+	ParentID           int    `json:"parent_id" db:"parent_id"`
+	CategoryName       string `json:"category_name" db:"category_name"`
+	ParentCategoryName string `json:"parent_category_name,omitempty" db:"parent_category_name"`
+	// buyer
+	BuyerAccountName  *string `json:"buyer_account_name" db:"buyer_account_name"`
+	BuyerNumSellItems *int    `json:"buyer_num_sell_items" db:"buyer_num_sell_items"`
+	// transaction_evidence
+	TransactionEvidenceID     *int64  `json:"transaction_evidence_id" db:"transaction_evidence_id"`
+	TransactionEvidenceStatus *string `json:"transaction_evidence_status" db:"transaction_evidence_status"`
+	// shippings
+	ReserveID *string `json:"reserve_id" db:"reserve_id"`
+}
+
+const getTransactionsBaseSQL = `
+	SELECT
+		items.*,
+		users.account_name,
+		users.num_sell_items,
+		categories.parent_id,
+		categories.category_name,
+		parent_categories.category_name AS parent_category_name,
+		buyer.account_name AS buyer_account_name,
+		buyer.num_sell_items AS buyer_num_sell_items,
+		transaction_evidences.id AS transaction_evidence_id,
+		transaction_evidences.status AS transaction_evidence_status,
+		shippings.reserve_id
+	FROM items
+	LEFT JOIN users
+		ON items.seller_id = users.id
+	LEFT JOIN categories
+		ON items.category_id = categories.id
+	LEFT JOIN categories AS parent_categories
+		ON categories.parent_id = parent_categories.id
+	LEFT JOIN users AS buyer
+		ON items.buyer_id = buyer.id
+	LEFT JOIN transaction_evidences
+		ON transaction_evidences.item_id = items.id
+	LEFT JOIN shippings
+		ON shippings.transaction_evidence_id = transaction_evidences.id
+`
 
 func getTransactions(w http.ResponseWriter, r *http.Request) {
 
@@ -868,11 +1178,13 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tx := dbx.MustBegin()
-	items := []Item{}
+	items := []getTransactionsDTO{}
+	// items := []Item{}
 	if itemID > 0 && createdAt > 0 {
 		// paging
 		err := tx.Select(&items,
-			"SELECT * FROM `items` WHERE (`seller_id` = ? OR `buyer_id` = ?) AND `status` IN (?,?,?,?,?) AND (`created_at` < ?  OR (`created_at` <= ? AND `id` < ?)) ORDER BY `created_at` DESC, `id` DESC LIMIT ?",
+			getTransactionsBaseSQL+
+				" WHERE (items.seller_id = ? OR items.buyer_id = ?) AND items.status IN (?,?,?,?,?) AND (items.created_at < ?  OR (items.created_at <= ? AND items.id < ?)) ORDER BY items.created_at DESC, items.id DESC LIMIT ?",
 			user.ID,
 			user.ID,
 			ItemStatusOnSale,
@@ -894,7 +1206,8 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// 1st page
 		err := tx.Select(&items,
-			"SELECT * FROM `items` WHERE (`seller_id` = ? OR `buyer_id` = ?) AND `status` IN (?,?,?,?,?) ORDER BY `created_at` DESC, `id` DESC LIMIT ?",
+			getTransactionsBaseSQL+
+				" WHERE (items.seller_id = ? OR items.buyer_id = ?) AND items.status IN (?,?,?,?,?) ORDER BY items.created_at DESC, items.id DESC LIMIT ?",
 			user.ID,
 			user.ID,
 			ItemStatusOnSale,
@@ -913,98 +1226,149 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	itemDetails := []ItemDetail{}
-	for _, item := range items {
-		seller, err := getUserSimpleByID(tx, item.SellerID)
-		if err != nil {
-			outputErrorMsg(w, http.StatusNotFound, "seller not found")
-			tx.Rollback()
-			return
-		}
-		category, err := getCategoryByID(tx, item.CategoryID)
-		if err != nil {
-			outputErrorMsg(w, http.StatusNotFound, "category not found")
-			tx.Rollback()
-			return
+
+	wg := &sync.WaitGroup{}
+	mux := sync.Mutex{}
+	limit := make(chan struct{}, 20)
+	hasNext := false
+	for i, item := range items {
+		if i == TransactionsPerPage {
+			hasNext = true
+			break
 		}
 
-		itemDetail := ItemDetail{
-			ID:       item.ID,
-			SellerID: item.SellerID,
-			Seller:   &seller,
-			// BuyerID
-			// Buyer
-			Status:      item.Status,
-			Name:        item.Name,
-			Price:       item.Price,
-			Description: item.Description,
-			ImageURL:    getImageURL(item.ImageName),
-			CategoryID:  item.CategoryID,
-			// TransactionEvidenceID
-			// TransactionEvidenceStatus
-			// ShippingStatus
-			Category:  &category,
-			CreatedAt: item.CreatedAt.Unix(),
-		}
+		wg.Add(1)
+		go func(item getTransactionsDTO) {
+			limit <- struct{}{}
 
-		if item.BuyerID != 0 {
-			buyer, err := getUserSimpleByID(tx, item.BuyerID)
-			if err != nil {
-				outputErrorMsg(w, http.StatusNotFound, "buyer not found")
-				tx.Rollback()
-				return
+			// seller, err := getUserSimpleByID(tx, item.SellerID)
+			// if err != nil {
+			// 	outputErrorMsg(w, http.StatusNotFound, "seller not found")
+			// 	tx.Rollback()
+			// 	return
+			// }
+			// category, err := getCategoryByID(tx, item.CategoryID)
+			// if err != nil {
+			// 	outputErrorMsg(w, http.StatusNotFound, "category not found")
+			// 	tx.Rollback()
+			// 	return
+			// }
+			seller := UserSimple{
+				ID:           item.SellerID,
+				AccountName:  item.AccountName,
+				NumSellItems: item.NumSellItems,
 			}
-			itemDetail.BuyerID = item.BuyerID
-			itemDetail.Buyer = &buyer
-		}
-
-		transactionEvidence := TransactionEvidence{}
-		err = tx.Get(&transactionEvidence, "SELECT * FROM `transaction_evidences` WHERE `item_id` = ?", item.ID)
-		if err != nil && err != sql.ErrNoRows {
-			// It's able to ignore ErrNoRows
-			log.Print(err)
-			outputErrorMsg(w, http.StatusInternalServerError, "db error")
-			tx.Rollback()
-			return
-		}
-
-		if transactionEvidence.ID > 0 {
-			shipping := Shipping{}
-			err = tx.Get(&shipping, "SELECT * FROM `shippings` WHERE `transaction_evidence_id` = ?", transactionEvidence.ID)
-			if err == sql.ErrNoRows {
-				outputErrorMsg(w, http.StatusNotFound, "shipping not found")
-				tx.Rollback()
-				return
-			}
-			if err != nil {
-				log.Print(err)
-				outputErrorMsg(w, http.StatusInternalServerError, "db error")
-				tx.Rollback()
-				return
-			}
-			ssr, err := APIShipmentStatus(getShipmentServiceURL(), &APIShipmentStatusReq{
-				ReserveID: shipping.ReserveID,
-			})
-			if err != nil {
-				log.Print(err)
-				outputErrorMsg(w, http.StatusInternalServerError, "failed to request to shipment service")
-				tx.Rollback()
-				return
+			category := Category{
+				ID:                 item.CategoryID,
+				CategoryName:       item.CategoryName,
+				ParentID:           item.ParentID,
+				ParentCategoryName: item.ParentCategoryName,
 			}
 
-			itemDetail.TransactionEvidenceID = transactionEvidence.ID
-			itemDetail.TransactionEvidenceStatus = transactionEvidence.Status
-			itemDetail.ShippingStatus = ssr.Status
-		}
+			var buyer *UserSimple
+			if item.BuyerID > 0 {
+				buyer = &UserSimple{
+					ID:           item.BuyerID,
+					AccountName:  *item.BuyerAccountName,
+					NumSellItems: *item.BuyerNumSellItems,
+				}
+			}
+			itemDetail := ItemDetail{
+				ID:          item.ID,
+				SellerID:    item.SellerID,
+				Seller:      &seller,
+				BuyerID:     item.BuyerID,
+				Buyer:       buyer,
+				Status:      item.Status,
+				Name:        item.Name,
+				Price:       item.Price,
+				Description: item.Description,
+				ImageURL:    getImageURL(item.ImageName),
+				CategoryID:  item.CategoryID,
+				// TransactionEvidenceID:     *item.TransactionEvidenceID,
+				// TransactionEvidenceStatus: *item.TransactionEvidenceStatus,
+				// ShippingStatus
+				Category:  &category,
+				CreatedAt: item.CreatedAt.Unix(),
+			}
 
-		itemDetails = append(itemDetails, itemDetail)
+			// if item.BuyerID != 0 {
+			// 	buyer, err := getUserSimpleByID(tx, item.BuyerID)
+			// 	if err != nil {
+			// 		outputErrorMsg(w, http.StatusNotFound, "buyer not found")
+			// 		tx.Rollback()
+			// 		return
+			// 	}
+			// 	itemDetail.BuyerID = item.BuyerID
+			// 	itemDetail.Buyer = &buyer
+			// }
+
+			// transactionEvidence := TransactionEvidence{}
+			// err = tx.Get(&transactionEvidence, "SELECT * FROM `transaction_evidences` WHERE `item_id` = ?", item.ID)
+			// if err != nil && err != sql.ErrNoRows {
+			// 	// It's able to ignore ErrNoRows
+			// 	log.Print(err)
+			// 	outputErrorMsg(w, http.StatusInternalServerError, "db error")
+			// 	tx.Rollback()
+			// 	return
+			// }
+
+			if item.TransactionEvidenceID != nil {
+				// shipping := Shipping{}
+				// err = tx.Get(&shipping, "SELECT * FROM `shippings` WHERE `transaction_evidence_id` = ?", transactionEvidence.ID)
+				// if err == sql.ErrNoRows {
+				// 	outputErrorMsg(w, http.StatusNotFound, "shipping not found")
+				// 	tx.Rollback()
+				// 	return
+				// }
+				// if err != nil {
+				// 	log.Print(err)
+				// 	outputErrorMsg(w, http.StatusInternalServerError, "db error")
+				// 	tx.Rollback()
+				// 	return
+				// }
+
+				// ssr, err := APIShipmentStatus(getShipmentServiceURL(), &APIShipmentStatusReq{
+				// 	ReserveID: shipping.ReserveID,
+				// })
+				if item.ReserveID == nil {
+					outputErrorMsg(w, http.StatusNotFound, "shipping not found")
+					tx.Rollback()
+					return
+				}
+				ssr, err := APIShipmentStatus(getShipmentServiceURL(), &APIShipmentStatusReq{
+					ReserveID: *item.ReserveID,
+				})
+				if err != nil {
+					log.Print(err)
+					outputErrorMsg(w, http.StatusInternalServerError, "failed to request to shipment service")
+					tx.Rollback()
+					return
+				}
+
+				itemDetail.TransactionEvidenceID = *item.TransactionEvidenceID
+				itemDetail.TransactionEvidenceStatus = *item.TransactionEvidenceStatus
+				itemDetail.ShippingStatus = ssr.Status
+			}
+
+			mux.Lock()
+			itemDetails = append(itemDetails, itemDetail)
+			mux.Unlock()
+
+			<-limit
+			wg.Done()
+		}(item)
 	}
+	wg.Wait()
 	tx.Commit()
 
-	hasNext := false
-	if len(itemDetails) > TransactionsPerPage {
-		hasNext = true
-		itemDetails = itemDetails[0:TransactionsPerPage]
-	}
+	sort.Slice(itemDetails, func(i, j int) bool { return itemDetails[i].CreatedAt > itemDetails[j].CreatedAt })
+
+	// hasNext := false
+	// if len(itemDetails) > TransactionsPerPage {
+	// 	hasNext = true
+	// 	itemDetails = itemDetails[0:TransactionsPerPage]
+	// }
 
 	rts := resTransactions{
 		Items:   itemDetails,
@@ -1024,14 +1388,62 @@ func getItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, errCode, errMsg := getUser(r)
-	if errMsg != "" {
-		outputErrorMsg(w, errCode, errMsg)
-		return
-	}
+	// user, errCode, errMsg := getUser(r)
+	// if errMsg != "" {
+	// 	outputErrorMsg(w, errCode, errMsg)
+	// 	return
+	// }
 
-	item := Item{}
-	err = dbx.Get(&item, "SELECT * FROM `items` WHERE `id` = ?", itemID)
+	// item := Item{}
+	// err = dbx.Get(&item, "SELECT * FROM `items` WHERE `id` = ?", itemID)
+	// if err == sql.ErrNoRows {
+	// 	outputErrorMsg(w, http.StatusNotFound, "item not found")
+	// 	return
+	// }
+	// if err != nil {
+	// 	log.Print(err)
+	// 	outputErrorMsg(w, http.StatusInternalServerError, "db error")
+	// 	return
+	// }
+
+	// category, err := getCategoryByID(dbx, item.CategoryID)
+	// if err != nil {
+	// 	outputErrorMsg(w, http.StatusNotFound, "category not found")
+	// 	return
+	// }
+
+	// seller, err := getUserSimpleByID(dbx, item.SellerID)
+	// if err != nil {
+	// 	outputErrorMsg(w, http.StatusNotFound, "seller not found")
+	// 	return
+	// }
+
+	// itemDetail := ItemDetail{
+	// 	ID:       item.ID,
+	// 	SellerID: item.SellerID,
+	// 	Seller:   &seller,
+	// 	// BuyerID
+	// 	// Buyer
+	// 	Status:      item.Status,
+	// 	Name:        item.Name,
+	// 	Price:       item.Price,
+	// 	Description: item.Description,
+	// 	ImageURL:    getImageURL(item.ImageName),
+	// 	CategoryID:  item.CategoryID,
+	// 	// TransactionEvidenceID
+	// 	// TransactionEvidenceStatus
+	// 	// ShippingStatus
+	// 	Category:  &category,
+	// 	CreatedAt: item.CreatedAt.Unix(),
+	// }
+
+	item := JoinedItemV2{}
+	err = dbx.Get(
+		&item,
+		itemBaseSQLV2+
+			" WHERE items.id = ?",
+		itemID,
+	)
 	if err == sql.ErrNoRows {
 		outputErrorMsg(w, http.StatusNotFound, "item not found")
 		return
@@ -1042,73 +1454,77 @@ func getItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	category, err := getCategoryByID(dbx, item.CategoryID)
-	if err != nil {
-		outputErrorMsg(w, http.StatusNotFound, "category not found")
-		return
+	seller := UserSimple{
+		ID:           item.SellerID,
+		AccountName:  item.SellerAccountName.String,
+		NumSellItems: int(item.SellerNumSellItems.Int64),
 	}
-
-	seller, err := getUserSimpleByID(dbx, item.SellerID)
-	if err != nil {
-		outputErrorMsg(w, http.StatusNotFound, "seller not found")
-		return
+	buyer := UserSimple{
+		ID:           item.BuyerID,
+		AccountName:  item.BuyerAccountName.String,
+		NumSellItems: int(item.BuyerNumSellItems.Int64),
 	}
-
+	category := Category{
+		ID:                 item.CategoryID,
+		ParentID:           item.ParentID,
+		CategoryName:       item.CategoryName,
+		ParentCategoryName: item.ParentCategoryName,
+	}
 	itemDetail := ItemDetail{
-		ID:       item.ID,
-		SellerID: item.SellerID,
-		Seller:   &seller,
-		// BuyerID
-		// Buyer
-		Status:      item.Status,
-		Name:        item.Name,
-		Price:       item.Price,
-		Description: item.Description,
-		ImageURL:    getImageURL(item.ImageName),
-		CategoryID:  item.CategoryID,
-		// TransactionEvidenceID
-		// TransactionEvidenceStatus
-		// ShippingStatus
-		Category:  &category,
-		CreatedAt: item.CreatedAt.Unix(),
+		ID:                        item.ID,
+		SellerID:                  item.SellerID,
+		Seller:                    &seller,
+		BuyerID:                   item.BuyerID,
+		Buyer:                     &buyer,
+		Status:                    item.Status,
+		Name:                      item.Name,
+		Price:                     item.Price,
+		Description:               item.Description,
+		ImageURL:                  getImageURL(item.ImageName),
+		CategoryID:                item.CategoryID,
+		TransactionEvidenceID:     item.TransactionEvidenceID.Int64,
+		TransactionEvidenceStatus: item.TransactionEvidenceStatus.String,
+		ShippingStatus:            item.ShippingStatus.String,
+		Category:                  &category,
+		CreatedAt:                 item.CreatedAt.Unix(),
 	}
 
-	if (user.ID == item.SellerID || user.ID == item.BuyerID) && item.BuyerID != 0 {
-		buyer, err := getUserSimpleByID(dbx, item.BuyerID)
-		if err != nil {
-			outputErrorMsg(w, http.StatusNotFound, "buyer not found")
-			return
-		}
-		itemDetail.BuyerID = item.BuyerID
-		itemDetail.Buyer = &buyer
+	// if (user.ID == item.SellerID || user.ID == item.BuyerID) && item.BuyerID != 0 {
+	// 	buyer, err := getUserSimpleByID(dbx, item.BuyerID)
+	// 	if err != nil {
+	// 		outputErrorMsg(w, http.StatusNotFound, "buyer not found")
+	// 		return
+	// 	}
+	// 	itemDetail.BuyerID = item.BuyerID
+	// 	itemDetail.Buyer = &buyer
 
-		transactionEvidence := TransactionEvidence{}
-		err = dbx.Get(&transactionEvidence, "SELECT * FROM `transaction_evidences` WHERE `item_id` = ?", item.ID)
-		if err != nil && err != sql.ErrNoRows {
-			// It's able to ignore ErrNoRows
-			log.Print(err)
-			outputErrorMsg(w, http.StatusInternalServerError, "db error")
-			return
-		}
+	// 	transactionEvidence := TransactionEvidence{}
+	// 	err = dbx.Get(&transactionEvidence, "SELECT * FROM `transaction_evidences` WHERE `item_id` = ?", item.ID)
+	// 	if err != nil && err != sql.ErrNoRows {
+	// 		// It's able to ignore ErrNoRows
+	// 		log.Print(err)
+	// 		outputErrorMsg(w, http.StatusInternalServerError, "db error")
+	// 		return
+	// 	}
 
-		if transactionEvidence.ID > 0 {
-			shipping := Shipping{}
-			err = dbx.Get(&shipping, "SELECT * FROM `shippings` WHERE `transaction_evidence_id` = ?", transactionEvidence.ID)
-			if err == sql.ErrNoRows {
-				outputErrorMsg(w, http.StatusNotFound, "shipping not found")
-				return
-			}
-			if err != nil {
-				log.Print(err)
-				outputErrorMsg(w, http.StatusInternalServerError, "db error")
-				return
-			}
+	// 	if transactionEvidence.ID > 0 {
+	// 		shipping := Shipping{}
+	// 		err = dbx.Get(&shipping, "SELECT * FROM `shippings` WHERE `transaction_evidence_id` = ?", transactionEvidence.ID)
+	// 		if err == sql.ErrNoRows {
+	// 			outputErrorMsg(w, http.StatusNotFound, "shipping not found")
+	// 			return
+	// 		}
+	// 		if err != nil {
+	// 			log.Print(err)
+	// 			outputErrorMsg(w, http.StatusInternalServerError, "db error")
+	// 			return
+	// 		}
 
-			itemDetail.TransactionEvidenceID = transactionEvidence.ID
-			itemDetail.TransactionEvidenceStatus = transactionEvidence.Status
-			itemDetail.ShippingStatus = shipping.Status
-		}
-	}
+	// 		itemDetail.TransactionEvidenceID = transactionEvidence.ID
+	// 		itemDetail.TransactionEvidenceStatus = transactionEvidence.Status
+	// 		itemDetail.ShippingStatus = shipping.Status
+	// 	}
+	// }
 
 	w.Header().Set("Content-Type", "application/json;charset=utf-8")
 	json.NewEncoder(w).Encode(itemDetail)
